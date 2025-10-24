@@ -1,7 +1,11 @@
-import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:pdh_recommendation/widgets/star_rating.dart';
+import 'package:pdh_recommendation/widgets/individual_suggestion_card.dart';
+import 'package:rxdart/utils.dart';
+import 'package:async/async.dart';
+
+import '../widgets/individual_review_card.dart';
 
 class ProfilePage extends StatelessWidget {
   const ProfilePage({super.key});
@@ -16,193 +20,167 @@ class ProfilePage extends StatelessWidget {
         child: SingleChildScrollView(
           child: Center(
             child: Card(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              elevation: 3,
+              margin: const EdgeInsets.all(16),
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+                padding: const EdgeInsets.all(20.0),
                 child: Column(
                   children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text(
-                          'PROFILE',
-                          style: TextStyle(
-                            fontSize: 20,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const Icon(Icons.person),
-                      ],
+                    // --- Profile Info from Firestore ---
+                    StreamBuilder<DocumentSnapshot>(
+                      stream: FirebaseFirestore.instance
+                          .collection('users')
+                          .doc(user?.uid)
+                          .snapshots(),
+                      builder: (context, snapshot) {
+                        if (!snapshot.hasData) {
+                          return const CircularProgressIndicator();
+                        }
+
+                        final data =
+                            snapshot.data!.data() as Map<String, dynamic>?;
+
+                        final userName = data?['name'] ?? 'Unnamed User';
+                        final userEmail = user?.email ?? '';
+
+                        return Column(
+                          children: [
+                            // Name
+                            Text(
+                              userName,
+                              style: const TextStyle(
+                                fontSize: 24, // bigger
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            // Email
+                            Text(
+                              userEmail,
+                              style: const TextStyle(
+                                fontSize: 18, // bigger
+                                fontStyle: FontStyle.italic,
+                                color: Colors.grey,
+                              ),
+                            ),
+                          ],
+                        );
+                      },
                     ),
+
+                    const SizedBox(height: 24),
+
+                    // --- Favorite Dishes Header ---
                     Align(
                       alignment: Alignment.centerLeft,
                       child: Text(
-                        'Welcome, ${user?.email ?? 'user'}!',
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontStyle: FontStyle.italic,
-                          fontWeight: FontWeight.bold,
-                        ),
+                        "Favorite Dishes",
+                        style: Theme.of(context).textTheme.titleMedium,
                       ),
                     ),
-                    const SizedBox(height: 20),
+                    const SizedBox(height: 8),
 
-                    // Recent Reviews
-                    ExpansionTile(
-                      title: const Text(
-                        'My Recent Reviews',
-                        style: TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      children: [
-                        StreamBuilder<QuerySnapshot>(
-                          stream:
-                              FirebaseFirestore.instance
-                                  .collection('reviews')
-                                  .where('userId', isEqualTo: user?.uid)
-                                  .orderBy('timestamp', descending: true)
-                                  .limit(5)
-                                  .snapshots(),
-                          builder: (context, snapshot) {
-                            if (snapshot.connectionState ==
-                                ConnectionState.waiting) {
-                              return const Padding(
-                                padding: EdgeInsets.all(8.0),
-                                child: Center(
-                                  child: CircularProgressIndicator(),
-                                ),
-                              );
-                            }
-                            if (snapshot.hasError) {
-                              return Padding(
-                                padding: const EdgeInsets.all(8.0),
-                                child: Text('Error: ${snapshot.error}'),
-                              );
-                            }
-                            final docs = snapshot.data?.docs ?? [];
-                            if (docs.isEmpty) {
-                              return const Padding(
-                                padding: EdgeInsets.all(8.0),
-                                child: Text('No recent reviews.'),
-                              );
-                            }
-                            return Column(
-                              children:
-                                  docs.map((doc) {
-                                    final data =
-                                        doc.data() as Map<String, dynamic>;
-                                    final String mealName =
-                                        data['meal'] ?? doc.id;
-                                    final double rating =
-                                        (data['rating'] != null)
-                                            ? (data['rating'] as num).toDouble()
-                                            : 0.0;
-                                    return Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                        vertical: 4.0,
-                                      ),
-                                      child: Row(
-                                        mainAxisAlignment:
-                                            MainAxisAlignment.spaceBetween,
-                                        children: [
-                                          Text(
-                                            mealName,
-                                            style: const TextStyle(
-                                              fontSize: 16,
-                                              fontWeight: FontWeight.bold,
-                                            ),
-                                          ),
-                                          StarRating(rating: rating),
-                                        ],
-                                      ),
-                                    );
-                                  }).toList(),
+                    // Favorites stream 
+                    StreamBuilder<DocumentSnapshot>(
+                      stream: FirebaseFirestore.instance
+                          .collection('users')
+                          .doc(user?.uid)
+                          .snapshots(),
+                      builder: (context, snapshot) {
+                        if (!snapshot.hasData) {
+                          return const CircularProgressIndicator();
+                        }
+
+                        final data =
+                            snapshot.data!.data() as Map<String, dynamic>?;
+                        final favorites = (data?['favorites'] as List<dynamic>?)
+                                ?.map((e) => e.toString())
+                                .toList() ??
+                            [];
+
+                        if (favorites.isEmpty) {
+                          return const Text(
+                              "You haven’t marked any favorites yet.");
+                        }
+
+                        return Column(
+                          children: favorites.map((meal) {
+                            return ListTile(
+                              title: Text(meal),
+                              trailing: const Icon(Icons.favorite,
+                                  color: Colors.pink),
                             );
-                          },
-                        ),
-                      ],
+                          }).toList(),
+                        );
+                      },
                     ),
+                    
+                    const SizedBox(height: 24),
 
-                    const SizedBox(height: 20),
-
-                    // Recent Suggestions
-                    ExpansionTile(
-                      title: const Text(
-                        'My Recent Suggestions',
-                        style: TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                        ),
+                    // --- Recent Activity Header ---
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        "Recent Activity",
+                        style: Theme.of(context).textTheme.titleMedium,
                       ),
-                      children: [
-                        StreamBuilder<QuerySnapshot>(
-                          stream:
-                              FirebaseFirestore.instance
-                                  .collection('suggestions')
-                                  .where('userId', isEqualTo: user?.uid)
-                                  .orderBy('timestamp', descending: true)
-                                  .limit(5)
-                                  .snapshots(),
-                          builder: (context, snapshot) {
-                            if (snapshot.connectionState ==
-                                ConnectionState.waiting) {
-                              return const Padding(
-                                padding: EdgeInsets.all(8.0),
-                                child: Center(
-                                  child: CircularProgressIndicator(),
-                                ),
-                              );
-                            }
-                            if (snapshot.hasError) {
-                              return Padding(
-                                padding: const EdgeInsets.all(8.0),
-                                child: Text('Error: ${snapshot.error}'),
-                              );
-                            }
-                            final docs = snapshot.data?.docs ?? [];
-                            if (docs.isEmpty) {
-                              return const Padding(
-                                padding: EdgeInsets.all(8.0),
-                                child: Text('No recent suggestions.'),
-                              );
-                            }
-                            return Column(
-                              children:
-                                  docs.map((doc) {
-                                    final data =
-                                        doc.data() as Map<String, dynamic>;
-                                    final String suggestionText =
-                                        data['title'] ?? doc.id;
-                                    final double rating =
-                                        (data['rating'] != null)
-                                            ? (data['rating'] as num).toDouble()
-                                            : 0.0;
-                                    return Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                        vertical: 4.0,
-                                      ),
-                                      child: Row(
-                                        mainAxisAlignment:
-                                            MainAxisAlignment.spaceBetween,
-                                        children: [
-                                          Text(
-                                            suggestionText,
-                                            style: const TextStyle(
-                                              fontSize: 16,
-                                              fontWeight: FontWeight.bold,
-                                            ),
-                                          ),
-                                          StarRating(rating: rating),
-                                        ],
-                                      ),
-                                    );
-                                  }).toList(),
-                            );
-                          },
-                        ),
-                      ],
                     ),
+                    const SizedBox(height: 8),
+
+                    // --- Recent Activity Feed ---
+                    StreamBuilder<List<QuerySnapshot>>(
+                      stream: StreamZip([
+                        FirebaseFirestore.instance
+                            .collection('reviews')
+                            .where('userId', isEqualTo: user?.uid)
+                            .snapshots(),
+                        FirebaseFirestore.instance
+                            .collection('suggestions')
+                            .where('userId', isEqualTo: user?.uid)
+                            .snapshots(),
+                      ]),
+                      builder: (context, snapshot) {
+                        if (!snapshot.hasData) {
+                          return const Center(child: CircularProgressIndicator());
+                        }
+
+                        final reviews = snapshot.data![0].docs.map((doc) => {
+                              'type': 'review',
+                              'doc': doc,
+                              'timestamp': (doc['timestamp'] as Timestamp?)?.toDate() ?? DateTime(0),
+                            });
+
+                        final suggestions = snapshot.data![1].docs.map((doc) => {
+                              'type': 'suggestion',
+                              'doc': doc,
+                              'timestamp': (doc['timestamp'] as Timestamp?)?.toDate() ?? DateTime(0),
+                            });
+
+                        final allActivities = [...reviews, ...suggestions];
+                        allActivities.sort((a, b) =>
+                            (b['timestamp'] as DateTime).compareTo(a['timestamp'] as DateTime));
+
+                        final recent = allActivities.take(5).toList();
+
+                        if (recent.isEmpty) {
+                          return const Text("No recent activity.");
+                        }
+
+                        return Column(
+                          children: recent.map((activity) {
+                            final doc = activity['doc'] as DocumentSnapshot<Map<String, dynamic>>;
+                            if (activity['type'] == 'review') {
+                              return IndividualReviewCard(doc: doc);
+                            } else {
+                              return IndividualSuggestionCard(doc: doc);
+                            }
+                          }).toList(),
+                        );
+                      },
+                    ),     
                   ],
                 ),
               ),
