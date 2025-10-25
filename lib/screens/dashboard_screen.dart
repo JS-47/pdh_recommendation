@@ -142,10 +142,7 @@ class _DashboardPageState extends State<DashboardPage> {
                         placement: "You’re 123 out of 4,234",
                         accuracy: "99% accuracy",
                       ),
-                      DashboardPopularityCard(
-                        placement: "You’re 456 out of 4,324",
-                        likeSummary: "49 total review likes",
-                      ),
+                      const DashboardPopularityCard(),
                     ],
                   ),
                 ),
