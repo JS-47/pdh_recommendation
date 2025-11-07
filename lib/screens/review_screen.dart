@@ -1,55 +1,28 @@
 import 'dart:collection';
 import 'dart:io';
 
-import 'package:camera/camera.dart';
+import 'package:video_player/video_player.dart';
+import 'package:video_compress/video_compress.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:pdh_recommendation/screens/camera_screen.dart';
 import 'package:provider/provider.dart';
 import '../main.dart';
-import '../widgets/review_card.dart';
-import '../widgets/suggestion_card.dart';
-import '../widgets/action_button.dart';
 
 final imagePicker = ImagePicker();
 
-typedef FoodEntry = DropdownMenuEntry<Food>;
-
-enum Food {
-  pizza('Pizza'),
-  pasta('Pasta'),
-  salad('Salad'),
-  sandwich('Sandwich'),
-  burger('Burger'),
-  sushi('Sushi');
-
-  const Food(this.label);
-  final String label;
-
-  static final List<FoodEntry> entries = UnmodifiableListView<FoodEntry>(
-    Food.values
-        .map<FoodEntry>(
-          (Food food) =>
-              DropdownMenuEntry<Food>(value: food, label: food.label),
-        )
-        .toList(),
-  );
-}
-
-/// Returns the current meal period based on the time.
-/// Breakfast: 7:30-10:30 AM, Lunch: 10:30-4:30 PM, Dinner: 4:30-9:30 PM.
-/// Outside of these hours returns null (hall closed).
 String? getCurrentMealPeriod() {
   final now = DateTime.now();
   final currentMinutes = now.hour * 60 + now.minute;
-  final breakfastStart = 7 * 60 + 30;
-  final breakfastEnd = 10 * 60 + 30;
-  final lunchStart = breakfastEnd;
-  final lunchEnd = 16 * 60 + 30;
-  final dinnerStart = lunchEnd;
-  final dinnerEnd = 21 * 60 + 30;
+  const breakfastStart = 7 * 60 + 30;
+  const breakfastEnd = 10 * 60 + 30;
+  const lunchStart = breakfastEnd;
+  const lunchEnd = 16 * 60 + 30;
+  const dinnerStart = lunchEnd;
+  const dinnerEnd = 23 * 60 + 30;
 
   if (currentMinutes >= breakfastStart && currentMinutes < breakfastEnd) {
     return 'breakfast';
@@ -58,12 +31,20 @@ String? getCurrentMealPeriod() {
   } else if (currentMinutes >= dinnerStart && currentMinutes < dinnerEnd) {
     return 'dinner';
   } else {
-    return null; // Dining hall closed
+    return null;
   }
 }
 
-/// Capitalizes the first letter of the given string.
 String capitalize(String s) => s[0].toUpperCase() + s.substring(1);
+
+String getTodayDateString() {
+  final now = DateTime.now();
+  return "${now.year.toString().padLeft(4, '0')}-"
+      "${now.month.toString().padLeft(2, '0')}-"
+      "${now.day.toString().padLeft(2, '0')}";
+}
+
+
 
 class ReviewPage extends StatefulWidget {
   @override
@@ -71,11 +52,110 @@ class ReviewPage extends StatefulWidget {
 }
 
 class _ReviewPageState extends State<ReviewPage> {
-  XFile? image;
-  XFile? photo;
-  double sliderValue = .5;
+  XFile? selectedImage;
+  XFile? selectedVideo;
+  double sliderValue = 0.0;
+  bool _submitting = false;
+  bool isFavorite = false;
+  List<String> userFavorites = [];
+  List<QueryDocumentSnapshot> _meals = [];
+  bool _mealsLoading = true;
+  String? _mealsError;
+  VideoPlayerController? _videoController;
 
-  // Define the available tags.
+  Future<void> pickImage(ImageSource source) async {
+    if (_submitting) return;
+
+    try {
+      final picked = await imagePicker.pickImage(source: source);
+      if (picked != null) {
+        setState(() => selectedImage = picked);
+      }
+    } catch (e) {
+      print("❌ pickImage error: $e");
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text("Error picking image: $e")));
+    }
+  }
+
+  Future<void> pickVideo(ImageSource source) async {
+    if (_submitting) return;
+
+    try {
+      final picked = await imagePicker.pickVideo(
+        source: source,
+        maxDuration: Duration(seconds: 10), // limit duration
+        preferredCameraDevice: CameraDevice.rear, // choose camera
+      );
+
+      if (picked == null) return;
+
+      print("▶️ Video picked: ${picked.path}");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Compressing video…")),
+      );
+
+      // Compress the video using video_compress
+      final info = await VideoCompress.compressVideo(
+        picked.path,
+        quality: VideoQuality.LowQuality, // low resolution
+        deleteOrigin: true, // trash original
+        includeAudio: false, // no audio
+      );
+
+      if (info == null || info.path == null) {
+        throw Exception("Video compression failed");
+      }
+
+      setState(() {
+        selectedVideo = XFile(info.path!); // update state with compressed file
+      });
+
+      final file = XFile(info.path!);
+      
+      _videoController?.dispose();
+      _videoController = VideoPlayerController.file(File(file.path))
+        ..initialize().then((_) {
+          setState (() {
+            selectedVideo = file;
+          }); 
+          // refresh UI
+          _videoController!.setLooping(true); // auto loop
+          _videoController!.play(); // auto play
+          
+        });
+      
+
+      print("✅ Video compressed: ${info.path}");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Video compressed successfully!")),
+      );
+
+    } catch (e) {
+      print("❌ pickVideo error: $e");
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text("Error picking video: $e")));
+    }
+  }
+
+
+  List<String> filterMeals(List<String> meals, String range) {
+    switch (range) {
+      case 'favorite':
+      return userFavorites;
+
+      case 'A-H':
+        return meals.where((m) => m[0].toUpperCase().compareTo('A') >= 0 && m[0].toUpperCase().compareTo('H') <= 0).toList();
+      case 'I-P':
+        return meals.where((m) => m[0].toUpperCase().compareTo('I') >= 0 && m[0].toUpperCase().compareTo('P') <= 0).toList();
+      case 'Q-Z':
+        return meals.where((m) => m[0].toUpperCase().compareTo('Q') >= 0 && m[0].toUpperCase().compareTo('Z') <= 0).toList();
+      default:
+        return meals;
+
+    }
+  }
+
   final List<String> availableTags = [
     'Healthy',
     'Flavorful',
@@ -87,369 +167,598 @@ class _ReviewPageState extends State<ReviewPage> {
     'Comforting',
     'Refreshing',
   ];
-  // List of tags the user has selected.
   List<String> selectedTags = [];
-
-  // Holds the selected meal (retrieved from Firestore).
   String? selectedMeal;
-
-  // Controller for review text.
   final TextEditingController reviewTextController = TextEditingController();
 
-  /// Stub for image upload.
-  /// Replace with Firebase Storage integration as needed.
-  Future<String?> uploadImage(File file) async {
-    // Upload file to storage and return its URL.
-    return file.path; // Placeholder, returns local path.
+  @override
+  void initState() {
+    super.initState();
+    // Ensure Firebase is initialized
+    Firebase.initializeApp()
+        .then((_) {
+          print('✅ Firebase initialized');
+          _loadMeals();
+          _loadFavorites();
+        })
+        .catchError((e) {
+          print('❌ Firebase.initializeApp error: $e');
+        });
   }
 
-  /// Submits the review to Firestore.
+  Future<void> _loadMeals() async {
+  final currentMealPeriod = getCurrentMealPeriod();
+  if (currentMealPeriod == null) return; // hall closed, skip
+
+  final todayDate = getTodayDateString();
+  final mealsCollectionRef = FirebaseFirestore.instance
+      .collection('meals')
+      .doc(todayDate)
+      .collection('meals');
+  final filterMealType = capitalize(currentMealPeriod);
+
+  try {
+    final snap = await mealsCollectionRef
+        .where('meal_type', isEqualTo: filterMealType)
+        .get();
+
+    setState(() {
+      _meals = snap.docs..sort((a, b) {
+        final nameA = (a.data())['name'] ?? a.id;
+        final nameB = (b.data())['name'] ?? b.id;
+        return (nameA as String).compareTo(nameB as String);
+      });
+      _mealsLoading = false;
+    });
+  } catch (e) {
+    setState(() {
+      _mealsError = e.toString();
+      _mealsLoading = false;
+    });
+  }
+}
+
+  void _showMealOptions(String range, List<QueryDocumentSnapshot> allMeals) {
+    final mealNames = allMeals
+        .map((doc) => (doc.data() as Map<String, dynamic>)['name'] as String? ?? doc.id)
+        .toList();
+    
+    final filtered = filterMeals(mealNames, range);
+
+    showModalBottomSheet(
+      context: context,
+      builder: (_) {
+        return ListView.builder(
+          itemCount: filtered.length,
+          itemBuilder: (_, index) {
+            final meal = filtered[index];
+            return ListTile(
+              title: Text(meal),
+              onTap: () {
+                setState(() {
+                  selectedMeal = meal;
+                });
+                Navigator.pop(context);
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _loadFavorites() async {
+  final uid = FirebaseAuth.instance.currentUser?.uid;
+  if (uid == null) return;
+
+  final doc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
+  final data = doc.data();
+  if (data != null && data['favorites'] is List) {
+    setState(() {
+      userFavorites = List<String>.from(data['favorites']);
+    });
+  } else {
+    setState(() {
+      userFavorites = [];
+    });
+  }
+}
+
+  Future<String?> uploadImage(File file, String reviewId) async {
+    print("🛠️ uploadImage start for ${file.path}");
+    // grab user id
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    // if not logged in, throw exception
+    if (uid == null) throw Exception("Not logged in");
+
+    try {
+      // name image file as milliseconds since epoch
+      final fileName = "${DateTime.now().millisecondsSinceEpoch}.jpg";
+      // store image at user 
+      final storagePath =
+          'users/$uid/$reviewId/images/$fileName';
+
+      // store to database
+      final ref = FirebaseStorage.instance.ref(storagePath);
+      final uploadTask = ref.putFile(file);
+
+      uploadTask.snapshotEvents.listen(
+        (snap) {
+          print(
+            "⬆️ state=${snap.state} "
+            "transferred=${snap.bytesTransferred}/${snap.totalBytes}",
+          );
+        },
+        onError: (e) {
+          print("⚠️ snapshotEvents error: $e");
+        },
+      );
+
+      final snapshot = await uploadTask.timeout(
+        Duration(seconds: 20),
+        onTimeout: () {
+          throw Exception("Upload timed out");
+        },
+      );
+      print("✅ uploadTask completed: ${snapshot.state}");
+      final url = await snapshot.ref.getDownloadURL();
+      print("🔗 downloadURL: $url");
+      return url;
+    } catch (e, st) {
+      print("❌ uploadImage error: $e\n$st");
+      return null;
+    }
+  }
+
+  Future<String?> uploadVideo(File file, String reviewId) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) throw Exception("Not logged in");
+
+    try {
+      final fileName = "${DateTime.now().millisecondsSinceEpoch}.mp4";
+      final storagePath = 'users/$uid/$reviewId/videos/$fileName';
+      final ref = FirebaseStorage.instance.ref(storagePath);
+      final uploadTask = ref.putFile(file);
+
+      final snapshot = await uploadTask;
+      return await snapshot.ref.getDownloadURL();
+    } catch (e) {
+      print("❌ uploadVideo error: $e");
+      return null;
+    }
+  }
+
   Future<void> submitReview() async {
-    // Check current meal period.
+    print("🔔 submitReview called");
     final currentMealPeriod = getCurrentMealPeriod();
     if (currentMealPeriod == null) {
+      print("⚠️ Hall closed, aborting submitReview");
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Panther Dining Hall is closed now.")),
       );
       return;
     }
-    // Validate required fields.
+
+    // ✅ Validation
     if (selectedMeal == null ||
-        sliderValue == 0 ||
-        selectedTags.isEmpty ||
+        sliderValue <= 0 ||
         reviewTextController.text.trim().isEmpty) {
+      print(
+        "⚠️ Validation failed: "
+        "meal=$selectedMeal, rating=$sliderValue, "
+        "textLength=${reviewTextController.text.trim().length}",
+      );
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Please fill in all required fields.")),
       );
       return;
     }
 
-    String? imageUrl;
-    // Optionally upload the selected image (if any).
-    if (image != null) {
-      imageUrl = await uploadImage(File(image!.path));
-    } else if (photo != null) {
-      imageUrl = await uploadImage(File(photo!.path));
+    setState(() => _submitting = true);
+
+    final reviewRef = FirebaseFirestore.instance.collection('reviews').doc(); // create doc reference
+    final reviewId = reviewRef.id;
+
+    String? mediaUrl;
+    try {
+      if (selectedImage != null) {
+        print("▶️ Starting image upload: ${selectedImage!.path}");
+        mediaUrl = await uploadImage(File(selectedImage!.path), reviewId);
+        print("✅ uploadImage returned URL: $mediaUrl");
+
+        if (mediaUrl == null) {
+          throw Exception("Image upload failed");
+        }
+      } else if (selectedVideo != null) {
+        mediaUrl = await uploadVideo(File(selectedVideo!.path), reviewId);
+      }
+    } catch (e) {
+      print("❌ uploadImage threw error: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Image upload failed: $e")),
+      );
+      setState(() => _submitting = false);
+      return;
     }
 
-    // Construct review object.
     final reviewData = {
       'userId': FirebaseAuth.instance.currentUser?.uid,
       'meal': selectedMeal,
       'rating': sliderValue,
-      'tags': selectedTags,
+      'tags': selectedTags, // ✅ still stored, but optional
       'reviewText': reviewTextController.text.trim(),
-      'imageUrl': imageUrl, // May be null if no image selected.
+      'mediaUrl': mediaUrl,
       'timestamp': FieldValue.serverTimestamp(),
     };
+    print("▶️ Writing review to Firestore: $reviewData");
 
-    // Submit the review to Firestore.
     try {
-      await FirebaseFirestore.instance.collection('reviews').add(reviewData);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text("Review submitted!")));
-      // Optionally clear the form here.
+      await FirebaseFirestore.instance
+          .collection('reviews')
+          .add(reviewData)
+          .timeout(Duration(seconds: 10));
+      print("✅ Firestore.add succeeded");
+
+      // ✅ Update favorites only if the heart toggle is on
+      if (selectedMeal != null && userFavorites.contains(selectedMeal)) {
+        final uid = FirebaseAuth.instance.currentUser?.uid;
+        if (uid != null) {
+          final userDoc = FirebaseFirestore.instance.collection('users').doc(uid);
+          await userDoc.set({
+            'favorites': FieldValue.arrayUnion([selectedMeal])
+          }, SetOptions(merge: true));
+          print("✅ Updated favorites with $selectedMeal");
+        }
+      }
+
+      // ✅ When review is complete, return to previous screen
+      final appState = Provider.of<MyAppState>(context, listen: false);
+      appState.setSelectedIndex(2); // Dashboard tab index
+      Navigator.of(context).pop();  // close the review screen
+
+      // ✅ Reset UI state
+      setState(() {
+        selectedImage = null;        
+        sliderValue = .5;
+        selectedTags.clear();
+        reviewTextController.clear();
+        selectedMeal = null;
+      });
     } catch (e) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text("Error: $e")));
+      print("❌ Firestore.add error: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Error submitting review: $e")),
+      );
+    } finally {
+      setState(() => _submitting = false);
     }
   }
 
+void showCameraOptions(BuildContext context) {
+  showModalBottomSheet(
+    context: context,
+    builder: (BuildContext ctx) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ElevatedButton.icon(
+            icon: Icon(Icons.camera_alt),
+            label: Text("Take Photo"),
+            onPressed: () {
+              Navigator.pop(ctx);
+              pickImage(ImageSource.camera);
+            },
+          ),
+          ElevatedButton.icon(
+            icon: Icon(Icons.videocam),
+            label: Text("Record Video"),
+            onPressed: () {
+              Navigator.pop(ctx);
+              pickVideo(ImageSource.camera);
+            },
+          ),
+        ],
+      );
+    },
+  );
+}
+
   @override
   Widget build(BuildContext context) {
-    // Access the app state.
     final appState = Provider.of<MyAppState>(context);
     final currentMealPeriod = getCurrentMealPeriod();
+    final todayDate = getTodayDateString();
+
+    final mealsCollectionRef = FirebaseFirestore.instance
+        .collection('meals')
+        .doc(todayDate)
+        .collection('meals');
+    final filterMealType =
+        currentMealPeriod != null ? capitalize(currentMealPeriod) : '';
+
+    final queryFuture =
+        mealsCollectionRef.where('meal_type', isEqualTo: filterMealType).get();
 
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.primary,
       body:
-          appState.isLoading
-              ? Center(child: CircularProgressIndicator(color: Colors.white))
-              : SafeArea(
+          appState.isLoading // If Loading...
+              ? Center(child: CircularProgressIndicator(color: Colors.white)) // Show circular loading indicator
+              : SafeArea( // after loading, create the rest of the visuals
                 child: SingleChildScrollView(
-                  padding: EdgeInsets.all(16.0),
-                  child: Column(
+                  padding: EdgeInsets.all(16),
+                  child: Column(  // column that represents all the content on the page
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      Card(
+                      Card( // card in the main column which carries all the info
                         shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8.0),
+                          borderRadius: BorderRadius.circular(8),
                         ),
                         child: Padding(
-                          padding: EdgeInsets.all(16.0),
-                          child: Column(
+                          padding: EdgeInsets.all(16),
+                          child: Column(  // column within the card that holds all actual stuff on the card
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(
+                              Text( // header text to remind individuals to leave reviews
                                 "Leave a Review!",
                                 style: TextStyle(
                                   fontSize: 18,
                                   fontWeight: FontWeight.bold,
                                 ),
                               ),
-                              // Food Selection: Either a dropdown if open, or a closed message.
-                              currentMealPeriod == null
-                                  ? Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 16.0,
-                                    ),
-                                    child: Center(
-                                      child: Text(
-                                        "Panther Dining Hall is closed",
-                                      ),
-                                    ),
-                                  )
-                                  : FutureBuilder<QuerySnapshot>(
-                                    future:
-                                        FirebaseFirestore.instance
-                                            .collection('meals')
-                                            .where(
-                                              'meal_type',
-                                              isEqualTo: capitalize(
-                                                currentMealPeriod,
-                                              ),
-                                            )
-                                            .get(),
-                                    builder: (context, snapshot) {
-                                      if (!snapshot.hasData) {
-                                        return Center(
-                                          child: CircularProgressIndicator(),
-                                        );
-                                      }
-                                      // Extract meal names (or IDs) from documents.
-                                      final meals = snapshot.data!.docs;
-                                      return DropdownButton<String>(
-                                        hint: Text("Select a meal"),
-                                        value: selectedMeal,
-                                        items:
-                                            meals.map((doc) {
-                                              final mealName =
-                                                  doc['name'] as String;
-                                              return DropdownMenuItem<String>(
-                                                value: mealName,
-                                                child: Text(mealName),
-                                              );
-                                            }).toList(),
-                                        onChanged: (value) {
-                                          setState(() {
-                                            selectedMeal = value;
-                                          });
-                                        },
-                                      );
-                                    },
-                                  ),
-                              // Star Rating Section
-                              Padding(
-                                padding: const EdgeInsets.only(top: 16.0),
-                                child: Row(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: List.generate(5, (index) {
-                                    IconData iconData;
-                                    Color color;
 
-                                    if (sliderValue >= index + 1) {
-                                      iconData = Icons.star;
-                                      color = Colors.amber;
-                                    } else if (sliderValue >= index + 0.5) {
-                                      iconData = Icons.star_half;
-                                      color = Colors.amber;
-                                    } else {
-                                      iconData = Icons.star_border;
-                                      color = Colors.grey;
-                                    }
-                                    return Icon(
-                                      iconData,
-                                      color: color,
-                                      size: 32,
-                                    );
-                                  }),
-                                ),
-                              ),
-                              Slider(
-                                max: 5,
-                                divisions: 10,
-                                value: sliderValue,
-                                onChanged: (double value) {
-                                  setState(() {
-                                    sliderValue = value;
-                                  });
-                                },
-                              ),
-                              Center(
-                                child: Text(
-                                  'Rating: $sliderValue Stars',
-                                  style: TextStyle(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.bold,
+                              if (currentMealPeriod == null)  // if the dining hall is closed, shut down reviews.
+                                Padding(
+                                  padding: EdgeInsets.symmetric(vertical: 16),
+                                  child: Center(
+                                    child: Text("Dining Hall closed"),  
                                   ),
-                                ),
-                              ),
-                              // Horizontal Tag Selection System
-                              Padding(
-                                padding: const EdgeInsets.only(top: 16.0),
-                                child: SizedBox(
-                                  height: 40.0,
-                                  child: ListView(
-                                    scrollDirection: Axis.horizontal,
-                                    children:
-                                        availableTags.map((tag) {
-                                          bool isSelected = selectedTags
-                                              .contains(tag);
-                                          return Padding(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 4.0,
-                                            ),
-                                            child: ChoiceChip(
-                                              label: Text(tag),
-                                              selected: isSelected,
-                                              onSelected: (selected) {
-                                                setState(() {
-                                                  if (selected) {
-                                                    selectedTags.add(tag);
-                                                  } else {
-                                                    selectedTags.remove(tag);
-                                                  }
-                                                });
-                                              },
-                                            ),
-                                          );
-                                        }).toList(),
-                                  ),
-                                ),
-                              ),
-                              SizedBox(height: 16.0),
-                              // Review Text Field with Controller
-                              TextField(
-                                controller: reviewTextController,
-                                decoration: InputDecoration(
-                                  hintText: "Write a review...",
-                                  border: OutlineInputBorder(),
-                                ),
-                                maxLines: 3,
-                              ),
-                              // Photo and Image Upload Controls
-                              Padding(
-                                padding: const EdgeInsets.only(top: 8.0),
-                                child: Row(
-                                  crossAxisAlignment: CrossAxisAlignment.center,
+                                )
+                              else
+                              if (_mealsLoading)
+                                Center(child: CircularProgressIndicator())
+                              else if (_mealsError != null)
+                                Center(child: Text("Error loading meals: $_mealsError"))
+                              else
+                                Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    Expanded(
-                                      child: OutlinedButton(
-                                        style: OutlinedButton.styleFrom(
-                                          side: BorderSide(width: 1.5),
-                                          shape: RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.circular(
-                                              8.0,
-                                            ),
+                                    if (selectedMeal != null)
+                                      Padding(
+                                        padding: const EdgeInsets.only(top: 8.0),
+                                        child: Text(
+                                          selectedMeal!,
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 20,
+                                            fontStyle: FontStyle.italic,
                                           ),
                                         ),
-                                        child: Icon(Icons.camera_alt),
-                                        onPressed: () async {
-                                          final XFile? pickedPhoto =
-                                              await imagePicker.pickImage(
-                                                source: ImageSource.camera,
-                                              );
-                                          setState(() {
-                                            photo = pickedPhoto;
-                                          });
-                                        },
                                       ),
-                                    ),
-                                    SizedBox(width: 8.0),
-                                    Expanded(
-                                      child: OutlinedButton(
-                                        style: OutlinedButton.styleFrom(
-                                          side: BorderSide(width: 1.5),
-                                          shape: RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.circular(
-                                              8.0,
-                                            ),
-                                          ),
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        ElevatedButton(
+                                          onPressed: () => _showMealOptions('favorite', _meals),
+                                          child: Icon(Icons.favorite, color: Colors.red),
                                         ),
-                                        child: Icon(Icons.image),
-                                        onPressed: () async {
-                                          final XFile? pickedImage =
-                                              await imagePicker.pickImage(
-                                                source: ImageSource.gallery,
-                                              );
-                                          setState(() {
-                                            image = pickedImage;
-                                          });
-                                        },
-                                      ),
+                                        ElevatedButton(
+                                          onPressed: () => _showMealOptions('A-H', _meals),
+                                          child: Text('A-H'),
+                                        ),
+                                        ElevatedButton(
+                                          onPressed: () => _showMealOptions('I-P', _meals),
+                                          child: Text('I-P'),
+                                        ),
+                                        ElevatedButton(
+                                          onPressed: () => _showMealOptions('Q-Z', _meals),
+                                          child: Text('Q-Z'),
+                                        ),
+                                      ],
                                     ),
                                   ],
                                 ),
+
+
+                              SizedBox(height: 16),
+                              Row(  // row with star icons and favorite button
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                    ...List.generate(5, (i) {
+                                    final icon =
+                                        sliderValue >= i + 1
+                                            ? Icons.star
+                                            : sliderValue >= i + 0.5
+                                            ? Icons.star_half
+                                            : Icons.star_border;
+                                    return Icon(icon, size: 32);
+                                  }),
+                                  SizedBox(width: 12), // space between stars and heart
+                                  GestureDetector(
+                                    onTap: () {
+                                      if (selectedMeal == null) return; // can't favorite without a meal selected
+                                      setState(() {
+                                        if (userFavorites.contains(selectedMeal)) {
+                                          // Toggle off locally
+                                          userFavorites.remove(selectedMeal);
+                                        } else {
+                                          // Toggle on locally
+                                          userFavorites.add(selectedMeal!);
+                                        }
+                                      });
+                                    },
+                                    child: Icon(
+                                      selectedMeal != null && userFavorites.contains(selectedMeal)
+                                          ? Icons.favorite
+                                          : Icons.favorite_border,
+                                      color: selectedMeal != null && userFavorites.contains(selectedMeal)
+                                          ? Colors.red
+                                          : Colors.grey,
+                                      size: 32,
+                                    ),
+                                  )
+
+                                ]
                               ),
-                              // Display Captured Photo/Image
-                              Row(
+                              Slider( // slider to allow user to enter star rating
+                                max: 5,
+                                divisions: 10,
+                                value: sliderValue,
+                                onChanged:
+                                    _submitting
+                                        ? null
+                                        : (v) =>
+                                            setState(() => sliderValue = v),
+                              ),
+                              Center( // text displaying star rating value to user
+                                child: Text(
+                                  'Rating: $sliderValue Stars',
+                                  style: TextStyle(fontWeight: FontWeight.bold),
+                                ),
+                              ),
+
+                              SizedBox(height: 16),
+                              SizedBox( // horizontal scroll for tag selection
+                                height: 40,
+                                child: ListView(
+                                  scrollDirection: Axis.horizontal,
+                                  children:
+                                      availableTags.map((tag) {
+                                        final sel = selectedTags.contains(tag);
+                                        return Padding(
+                                          padding: EdgeInsets.symmetric(
+                                            horizontal: 4,
+                                          ),
+                                          child: ChoiceChip(
+                                            label: Text(tag),
+                                            selected: sel,
+                                            onSelected:
+                                                _submitting
+                                                    ? null
+                                                    : (s) => setState(
+                                                      () =>
+                                                          s
+                                                              ? selectedTags
+                                                                  .add(tag)
+                                                              : selectedTags
+                                                                  .remove(tag),
+                                                    ),
+                                          ),
+                                        );
+                                      }).toList(),
+                                ),
+                              ),
+
+                              SizedBox(height: 16),
+                              TextField(  // review text field for review content
+                                controller: reviewTextController,
+                                decoration: InputDecoration(
+                                  hintText: "Write a review…",
+                                  border: OutlineInputBorder(),
+                                ),
+                                maxLines: 3,
+                                enabled: !_submitting,
+                              ),
+
+                              SizedBox(height: 8),
+                              Row(  // buttons for picking images or videos
+                                children: [
+                                  Expanded(
+                                    child: OutlinedButton(
+                                      onPressed: () => showCameraOptions(context),
+                                      child: Icon(Icons.camera_alt),
+                                    ),
+                                  ),
+                                  SizedBox(width: 8),
+                                  Expanded(
+                                    child: OutlinedButton(
+                                      onPressed: () => pickImage(ImageSource.gallery),
+                                      child: Icon(Icons.image),
+                                    ),
+                                  ),
+                                ],
+                              ),
+
+                              SizedBox(height: 8),
+
+                              Row(  // row containing photo if photo was taken
                                 mainAxisAlignment:
                                     MainAxisAlignment.spaceEvenly,
                                 children: [
-                                  if (photo != null)
-                                    Padding(
-                                      padding: const EdgeInsets.all(8.0),
-                                      child: Column(
-                                        children: [
-                                          Text('Photo Taken:'),
-                                          SizedBox(height: 8.0),
-                                          Container(
-                                            constraints: BoxConstraints(
-                                              maxWidth: 100,
-                                              maxHeight: 100,
-                                            ),
-                                            child: Image.file(
-                                              File(photo!.path),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
+                                  if (selectedImage != null)
+                                    Column(
+                                      children: [
+                                        Text('Selected Image'),
+                                        SizedBox(height: 8),
+                                        Image.file(
+                                          File(selectedImage!.path),
+                                          width: 100,
+                                          height: 100,
+                                          fit: BoxFit.cover,
+                                        ),
+                                      ],
                                     ),
-                                  if (image != null)
-                                    Padding(
-                                      padding: const EdgeInsets.all(8.0),
-                                      child: Column(
-                                        children: [
-                                          Text('Image Selected:'),
-                                          SizedBox(height: 8.0),
-                                          Container(
-                                            constraints: BoxConstraints(
-                                              maxWidth: 100,
-                                              maxHeight: 100,
-                                            ),
-                                            child: Image.file(
-                                              File(image!.path),
-                                            ),
+
+                                  if (selectedVideo != null && _videoController != null && _videoController!.value.isInitialized)
+                                    Column(
+                                      children: [
+                                        Text('Selected Video'),
+                                        SizedBox(height: 8),
+                                        Container(
+                                          width: 100,
+                                          height: 100,
+                                          child: AspectRatio(
+                                            aspectRatio: _videoController!.value.aspectRatio,
+                                            child: VideoPlayer(_videoController!),
+                                            )
+                                        ),
+                                        IconButton(
+                                          icon: Icon(
+                                            _videoController!.value.isPlaying
+                                              ? Icons.pause
+                                              : Icons.play_arrow,
                                           ),
-                                        ],
-                                      ),
-                                    ),
+                                          onPressed: () {
+                                            setState(() {
+                                              _videoController!.value.isPlaying
+                                                ? _videoController!.pause()
+                                                : _videoController!.play();
+                                            });
+                                          },
+                                        )
+                                      ],
+                                    )
                                 ],
                               ),
                             ],
                           ),
                         ),
                       ),
-                      // Submit Button
-                      ElevatedButton(
-                        onPressed: submitReview,
-                        child: Text("Submit Review"),
+
+                      SizedBox(height: 16),
+                      ElevatedButton( // button to submit review when finished
+                        onPressed: _submitting ? null : submitReview,
+                        child:
+                            _submitting
+                                ? SizedBox(
+                                  width: 24,
+                                  height: 24,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                                : Text("Submit Review"),
                       ),
                     ],
                   ),
                 ),
               ),
-      floatingActionButton: FloatingActionButton(
+      floatingActionButton: FloatingActionButton( // button to allow user to return to previous screen
         backgroundColor: Theme.of(context).colorScheme.primary,
-        onPressed: () {
-          Navigator.of(context).pop();
-        },
+        onPressed: () => Navigator.of(context).pop(),
         child: Icon(Icons.arrow_back),
       ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
     );
   }
 }
